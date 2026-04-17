@@ -62,5 +62,6 @@ class ClickOut(BaseModel):
 class StatsOut(BaseModel):
     slug: str
     destination_url: str
-    total_clicks: int
+    total_clicks: int    # human scans only (bots excluded)
+    bot_clicks: int      # monitoring pings (UptimeRobot etc.)
     recent_clicks: list[ClickOut]
