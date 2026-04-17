@@ -69,15 +69,69 @@ logger = logging.getLogger(__name__)
 
 
 # ── Application lifespan ──────────────────────────────────────────────────────
+import json as _json  # noqa: E402
+
+
+def _autoseed(db):
+    """
+    Re-seed slugs from SEED_LINKS env-var on every startup.
+
+    Why: Render free tier has no persistent disk — the SQLite file is lost
+    on every redeploy/restart.  Storing the slug→URL map in an env-var
+    means data survives container restarts automatically.
+
+    Set SEED_LINKS on Render as a JSON string, e.g.:
+        [{"slug":"test1","destination_url":"https://..."},
+         {"slug":"table_2","destination_url":"https://..."}]
+    """
+    raw = os.getenv("SEED_LINKS", "").strip()
+    if not raw:
+        return
+    try:
+        links = _json.loads(raw)
+    except Exception as exc:
+        logger.error("SEED_LINKS is not valid JSON: %r", exc)
+        return
+
+    seeded = 0
+    for item in links:
+        slug = item.get("slug", "").strip().lower()
+        url  = item.get("destination_url", "").strip()
+        if not slug or not url:
+            continue
+        exists = db.query(models.QRLink).filter(models.QRLink.slug == slug).first()
+        if not exists:
+            db.add(models.QRLink(
+                slug=slug,
+                destination_url=url,
+                created_at=datetime.utcnow(),
+            ))
+            seeded += 1
+        else:
+            # Always update the URL so you can change the form without reseeding
+            exists.destination_url = url
+    db.commit()
+    if seeded:
+        logger.info("AUTOSEED: inserted %d new slug(s) from SEED_LINKS", seeded)
+    else:
+        logger.info("AUTOSEED: all slugs already present, URLs refreshed")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Create DB tables on startup; nothing to teardown."""
+    """Create DB tables and auto-seed slugs on startup."""
     models.Base.metadata.create_all(bind=database.engine)
     logger.info("Database tables initialised.")
     if ADMIN_API_KEY == "change-me-before-deploy":
         logger.warning(
             "ADMIN_API_KEY is still the default — set it via env-var before going live!"
         )
+    # Re-seed from env-var so slugs survive container restarts on Render free tier
+    db = database.SessionLocal()
+    try:
+        _autoseed(db)
+    finally:
+        db.close()
     yield
 
 
