@@ -240,9 +240,9 @@ def root():
     return RedirectResponse(url=FALLBACK_URL, status_code=302)
 
 
-@app.get("/health", tags=["ops"])
+@app.api_route("/health", methods=["GET", "HEAD"], tags=["ops"])
 def health():
-    """Liveness probe — always returns 200."""
+    """Liveness probe — always returns 200. Accepts HEAD for UptimeRobot."""
     return {"status": "ok", "utc": datetime.utcnow().isoformat()}
 
 
