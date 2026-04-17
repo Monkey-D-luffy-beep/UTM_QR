@@ -288,14 +288,63 @@ def link_stats(
     )
 
 
-# ── Admin dashboard (HTML) ────────────────────────────────────────────────────
+# ── Admin dashboard (HTML, browser-accessible) ────────────────────────────────
 from fastapi.responses import HTMLResponse  # noqa: E402
+from fastapi import Query                   # noqa: E402
+
+_LOGIN_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>QR Dashboard — Login</title>
+  <style>
+    *{{box-sizing:border-box;margin:0;padding:0}}
+    body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+          background:#0f172a;color:#e2e8f0;min-height:100vh;
+          display:flex;align-items:center;justify-content:center}}
+    .box{{background:#1e293b;border-radius:1rem;padding:2.5rem 2rem;width:100%;max-width:360px}}
+    h1{{font-size:1.25rem;margin-bottom:.5rem;color:#f8fafc}}
+    p{{color:#94a3b8;font-size:.875rem;margin-bottom:1.5rem}}
+    input{{width:100%;padding:.75rem 1rem;background:#0f172a;border:1px solid #334155;
+           border-radius:.5rem;color:#f1f5f9;font-size:1rem;margin-bottom:1rem}}
+    input:focus{{outline:none;border-color:#38bdf8}}
+    button{{width:100%;padding:.75rem;background:#0ea5e9;border:none;border-radius:.5rem;
+            color:#fff;font-size:1rem;font-weight:600;cursor:pointer}}
+    button:hover{{background:#0284c7}}
+    .err{{color:#f87171;font-size:.85rem;margin-top:.75rem;text-align:center}}
+  </style>
+</head>
+<body>
+  <div class="box">
+    <h1>QR Scan Dashboard</h1>
+    <p>Enter your admin API key to view scan stats.</p>
+    <form method="get" action="/admin/dashboard">
+      <input type="password" name="key" placeholder="Admin API Key" required autofocus>
+      <button type="submit">View Dashboard</button>
+      {error}
+    </form>
+  </div>
+</body>
+</html>"""
 
 
-@app.get("/admin/dashboard", tags=["admin"], dependencies=_admin_deps,
-         response_class=HTMLResponse)
-def dashboard(db: Session = Depends(database.get_db)):
-    """Human-readable HTML dashboard showing all slugs and their scan counts."""
+@app.get("/admin/dashboard", tags=["admin"], response_class=HTMLResponse,
+         include_in_schema=False)
+def dashboard(key: str = Query(default=""), db: Session = Depends(database.get_db)):
+    """
+    Browser-accessible dashboard.
+    Auth via ?key=YOUR_API_KEY query param (submitted by the login form).
+    """
+    # ── Auth ──────────────────────────────────────────────────────────────────
+    if not key or key != ADMIN_API_KEY:
+        error_msg = '<p class="err">Incorrect key — try again.</p>' if key else ""
+        return HTMLResponse(
+            content=_LOGIN_PAGE.format(error=error_msg),
+            status_code=200,
+        )
+
+    # ── Data ──────────────────────────────────────────────────────────────────
     links = db.query(models.QRLink).order_by(models.QRLink.created_at).all()
 
     rows = ""
@@ -310,14 +359,18 @@ def dashboard(db: Session = Depends(database.get_db)):
         last   = max((c.timestamp for c in all_clicks if not _is_bot(c.user_agent)),
                      default=None)
         last_s = last.strftime("%d %b %Y %H:%M") if last else "—"
+        slug_safe = link.slug.replace("<", "&lt;").replace(">", "&gt;")
         rows += f"""
         <tr>
-          <td><code>{link.slug}</code></td>
+          <td><code>{slug_safe}</code></td>
           <td class="num">{human}</td>
           <td class="num muted">{bots}</td>
           <td class="muted">{last_s}</td>
-          <td class="url">{link.destination_url[:60]}…</td>
+          <td class="url">{link.destination_url[:70]}…</td>
         </tr>"""
+
+    if not rows:
+        rows = '<tr><td colspan="5" style="text-align:center;color:#475569;padding:2rem">No slugs yet — add them via the API.</td></tr>'
 
     total_human = sum(
         1 for lnk in links
@@ -329,54 +382,86 @@ def dashboard(db: Session = Depends(database.get_db)):
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="refresh" content="60">
   <title>QR Dashboard</title>
   <style>
     *{{box-sizing:border-box;margin:0;padding:0}}
     body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
           background:#0f172a;color:#e2e8f0;padding:2rem}}
     h1{{font-size:1.5rem;margin-bottom:.25rem;color:#f8fafc}}
-    .sub{{color:#94a3b8;font-size:.875rem;margin-bottom:2rem}}
-    .card{{background:#1e293b;border-radius:.75rem;overflow:hidden}}
+    .sub{{color:#94a3b8;font-size:.875rem;margin-bottom:2rem;line-height:1.6}}
+    .cards{{display:flex;gap:1rem;margin-bottom:2rem;flex-wrap:wrap}}
+    .card{{background:#1e293b;border-radius:.75rem;padding:1.25rem 1.5rem;flex:1;min-width:160px}}
+    .card-label{{font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:#64748b}}
+    .card-val{{font-size:2rem;font-weight:700;color:#38bdf8;margin-top:.25rem}}
+    .table-wrap{{background:#1e293b;border-radius:.75rem;overflow:hidden}}
     table{{width:100%;border-collapse:collapse}}
     th{{background:#334155;text-align:left;padding:.75rem 1rem;
         font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:#94a3b8}}
-    td{{padding:.75rem 1rem;border-top:1px solid #334155;font-size:.875rem}}
+    td{{padding:.75rem 1rem;border-top:1px solid #334155;font-size:.875rem;vertical-align:middle}}
     tr:hover td{{background:#243044}}
-    .num{{font-weight:700;font-size:1rem;color:#38bdf8}}
+    .num{{font-weight:700;font-size:1.1rem;color:#38bdf8}}
     .muted{{color:#64748b}}
-    .url{{font-size:.75rem;color:#64748b;max-width:300px;overflow:hidden;
+    .url{{font-size:.75rem;color:#64748b;max-width:320px;overflow:hidden;
            text-overflow:ellipsis;white-space:nowrap}}
-    .badge{{display:inline-block;background:#0ea5e9;color:#fff;
-             border-radius:9999px;padding:.15rem .6rem;font-size:.75rem;font-weight:700}}
     .footer{{margin-top:1rem;font-size:.75rem;color:#475569;
-              text-align:right}}
+              display:flex;justify-content:space-between;align-items:center}}
+    .tip{{background:#1e293b;border-radius:.5rem;padding:1rem 1.25rem;
+           margin-bottom:2rem;font-size:.8rem;color:#94a3b8;border-left:3px solid #0ea5e9}}
+    .tip strong{{color:#e2e8f0}}
+    a{{color:#38bdf8;text-decoration:none}}
   </style>
 </head>
 <body>
   <h1>QR Scan Dashboard</h1>
-  <p class="sub">Real human scans only &mdash; UptimeRobot and other bots are excluded automatically.<br>
-     Form <em>submissions</em> are tracked inside Google Forms &rarr; <strong>Responses</strong> tab.</p>
-  <div class="card">
+  <p class="sub">
+    Real human scans only — UptimeRobot &amp; other bots are filtered out automatically.<br>
+    Page auto-refreshes every 60 seconds.
+  </p>
+
+  <div class="tip">
+    <strong>Want to track form submissions too?</strong>
+    Open your Google Form → <strong>Responses</strong> tab → click the green Sheets icon to export to Google Sheets.
+    The <code>entry.222</code> column will show which table/slug submitted — cross-reference with scans above.
+  </div>
+
+  <div class="cards">
+    <div class="card">
+      <div class="card-label">Total Human Scans</div>
+      <div class="card-val">{total_human}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Active QR Codes</div>
+      <div class="card-val">{len(links)}</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Generated</div>
+      <div class="card-val" style="font-size:1rem;padding-top:.4rem">
+        {datetime.utcnow().strftime('%d %b %Y')}<br>
+        <span style="font-size:.75rem;color:#64748b">{datetime.utcnow().strftime('%H:%M UTC')}</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="table-wrap">
     <table>
       <thead>
         <tr>
-          <th>Slug</th>
+          <th>Slug (QR Code)</th>
           <th>Human Scans</th>
           <th>Bot Pings</th>
-          <th>Last Scan</th>
+          <th>Last Real Scan</th>
           <th>Destination URL</th>
         </tr>
       </thead>
       <tbody>{rows}</tbody>
     </table>
   </div>
+
   <div class="footer">
-    Total human scans across all slugs: <span class="badge">{total_human}</span>
-    &nbsp;&nbsp;|&nbsp;&nbsp;
-    Generated: {datetime.utcnow().strftime('%d %b %Y %H:%M UTC')}
-    &nbsp;&nbsp;&mdash;&nbsp;&nbsp;
-    <a href="/docs" style="color:#38bdf8">API docs</a>
+    <span>Bookmark: <code>{{}}</code> — refreshes every 60s</span>
+    <a href="/docs">API docs</a>
   </div>
 </body>
 </html>"""
