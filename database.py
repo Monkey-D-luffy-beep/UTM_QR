@@ -2,7 +2,8 @@
 database.py — SQLAlchemy engine + session factory.
 
 SQLite is used by default (file-based, zero infra cost).
-Set DATABASE_URL env-var to swap to PostgreSQL on any host.
+Set DATABASE_URL env-var to swap to MySQL/PostgreSQL on any host.
+Example (AWS RDS MySQL): mysql+pymysql://user:pass@host:3306/dbname
 
 SQLite optimisations applied on every connection:
   • WAL journal mode  → safe concurrent reads while a write is in flight
