@@ -133,6 +133,12 @@ def _verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")) -> None:
 
 
 # ── Public endpoints ──────────────────────────────────────────────────────────
+@app.get("/", tags=["ops"], include_in_schema=False)
+def root():
+    """Root — redirect to fallback so visiting the bare domain doesn't 404."""
+    return RedirectResponse(url=FALLBACK_URL, status_code=302)
+
+
 @app.get("/health", tags=["ops"])
 def health():
     """Liveness probe — always returns 200."""
