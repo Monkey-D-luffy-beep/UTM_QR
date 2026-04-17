@@ -45,6 +45,10 @@ class QRClick(Base):
     )
     ip: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     user_agent: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # Device metadata (parsed from user-agent in background after redirect fires)
+    device_type: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")
+    os_family: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    browser: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
 
     link: Mapped["QRLink"] = relationship("QRLink", back_populates="clicks")
 

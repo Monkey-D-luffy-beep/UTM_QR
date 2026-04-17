@@ -31,7 +31,7 @@ from dotenv import load_dotenv
 load_dotenv()  # must run before reading os.getenv() below
 from datetime import datetime
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, BackgroundTasks
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
@@ -186,6 +186,53 @@ def _verify_api_key(x_api_key: str = Header(..., alias="X-API-Key")) -> None:
         raise HTTPException(status_code=403, detail="Invalid API key")
 
 
+# ── Background click logger ───────────────────────────────────────────────────
+def _log_click(link_id: int, ip: str, ua: str) -> None:
+    """
+    Persist a scan to the DB.  Runs AFTER the redirect response is already
+    sent to the client — the user never waits for this.
+
+    Parses the user-agent string to capture device type, OS, and browser so
+    the dashboard can show what kinds of devices are scanning.
+    """
+    # Parse user-agent for device metadata
+    device_type = "unknown"
+    os_family   = "unknown"
+    browser     = "unknown"
+    try:
+        from user_agents import parse as _parse_ua
+        parsed      = _parse_ua(ua)
+        device_type = "mobile"  if parsed.is_mobile  else \
+                      "tablet"  if parsed.is_tablet  else \
+                      "bot"     if parsed.is_bot      else "desktop"
+        os_family   = (parsed.os.family or "Unknown")[:64]
+        browser     = (parsed.browser.family or "Unknown")[:64]
+    except Exception:
+        pass  # metadata is best-effort — never crash a click
+
+    db = database.SessionLocal()
+    try:
+        click = models.QRClick(
+            link_id=link_id,
+            timestamp=datetime.utcnow(),
+            ip=ip,
+            user_agent=ua,
+            device_type=device_type,
+            os_family=os_family,
+            browser=browser,
+        )
+        db.add(click)
+        db.commit()
+    except Exception as exc:
+        logger.error("CLICK_LOG_FAILED link_id=%s err=%r", link_id, exc)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
 # ── Public endpoints ──────────────────────────────────────────────────────────
 @app.get("/", tags=["ops"], include_in_schema=False)
 def root():
@@ -200,12 +247,20 @@ def health():
 
 
 @app.get("/r/{slug}", tags=["redirect"])
-def redirect(slug: str, request: Request, db: Session = Depends(database.get_db)):
+def redirect(
+    slug: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(database.get_db),
+):
     """
     Core QR redirect endpoint.
 
     CRITICAL CONTRACT — this handler MUST always issue a 302 redirect.
     It catches every possible exception and falls back to FALLBACK_URL.
+
+    Click logging is deferred to a BackgroundTask so the redirect fires
+    *before* any DB write — zero latency impact on the user.
     """
     ip = _real_ip(request)
     ua = request.headers.get("user-agent", "")[:512]
@@ -222,29 +277,13 @@ def redirect(slug: str, request: Request, db: Session = Depends(database.get_db)
             return RedirectResponse(url=FALLBACK_URL, status_code=302)
 
         destination = link.destination_url
-
-        # ── Log the click (failures here must NOT break the redirect) ──────
-        try:
-            click = models.QRClick(
-                link_id=link.id,
-                timestamp=datetime.utcnow(),
-                ip=ip,
-                user_agent=ua,
-            )
-            db.add(click)
-            db.commit()
-        except Exception as click_err:
-            logger.error("CLICK_LOG_FAILED slug=%s err=%r", slug, click_err)
-            try:
-                db.rollback()
-            except Exception:
-                pass
+        # Schedule DB write AFTER the redirect is sent — user never waits for it
+        background_tasks.add_task(_log_click, link.id, ip, ua)
 
         logger.info("REDIRECT slug=%s → %s ip=%s", slug, destination, ip)
         return RedirectResponse(url=destination, status_code=302)
 
     except Exception as exc:
-        # Absolute last resort — never let an exception surface to the user.
         logger.error("REDIRECT_EXCEPTION slug=%s err=%r ip=%s", slug, exc, ip)
         return RedirectResponse(url=FALLBACK_URL, status_code=302)
 
@@ -414,29 +453,36 @@ def dashboard(key: str = Query(default=""), db: Session = Depends(database.get_d
             .filter(models.QRClick.link_id == link.id)
             .all()
         )
-        human  = sum(1 for c in all_clicks if not _is_bot(c.user_agent))
-        bots   = len(all_clicks) - human
-        last   = max((c.timestamp for c in all_clicks if not _is_bot(c.user_agent)),
-                     default=None)
+        human_clicks = [c for c in all_clicks if not _is_bot(c.user_agent)]
+        bots   = len(all_clicks) - len(human_clicks)
+        human  = len(human_clicks)
+        last   = max((c.timestamp for c in human_clicks), default=None)
         last_s = last.strftime("%d %b %Y %H:%M") if last else "—"
         slug_safe = link.slug.replace("<", "&lt;").replace(">", "&gt;")
+        # Device breakdown for human scans
+        mob = sum(1 for c in human_clicks if c.device_type == "mobile")
+        tab = sum(1 for c in human_clicks if c.device_type == "tablet")
+        dsk = sum(1 for c in human_clicks if c.device_type == "desktop")
+        device_s = f"📱{mob} 💻{dsk}" + (f" 🖥{tab}" if tab else "")
         rows += f"""
         <tr>
           <td><code>{slug_safe}</code></td>
           <td class="num">{human}</td>
           <td class="num muted">{bots}</td>
+          <td class="muted">{device_s}</td>
           <td class="muted">{last_s}</td>
           <td class="url">{link.destination_url[:70]}…</td>
         </tr>"""
 
     if not rows:
-        rows = '<tr><td colspan="5" style="text-align:center;color:#475569;padding:2rem">No slugs yet — add them via the API.</td></tr>'
+        rows = '<tr><td colspan="6" style="text-align:center;color:#475569;padding:2rem">No slugs yet — add them via the API.</td></tr>'
 
-    total_human = sum(
-        1 for lnk in links
+    total_human = sum(len([c for c in
+        db.query(models.QRClick).filter(models.QRClick.link_id == lnk.id).all()
+        if not _is_bot(c.user_agent)]) for lnk in links)
+    total_mobile = sum(1 for lnk in links
         for c in db.query(models.QRClick).filter(models.QRClick.link_id == lnk.id).all()
-        if not _is_bot(c.user_agent)
-    )
+        if not _is_bot(c.user_agent) and c.device_type == "mobile")
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -492,6 +538,10 @@ def dashboard(key: str = Query(default=""), db: Session = Depends(database.get_d
       <div class="card-val">{total_human}</div>
     </div>
     <div class="card">
+      <div class="card-label">Mobile Scans 📱</div>
+      <div class="card-val">{total_mobile}</div>
+    </div>
+    <div class="card">
       <div class="card-label">Active QR Codes</div>
       <div class="card-val">{len(links)}</div>
     </div>
@@ -511,6 +561,7 @@ def dashboard(key: str = Query(default=""), db: Session = Depends(database.get_d
           <th>Slug (QR Code)</th>
           <th>Human Scans</th>
           <th>Bot Pings</th>
+          <th>Devices</th>
           <th>Last Real Scan</th>
           <th>Destination URL</th>
         </tr>

@@ -57,6 +57,9 @@ class ClickOut(BaseModel):
     timestamp: datetime
     ip: str
     user_agent: str
+    device_type: str = "unknown"
+    os_family: str = "unknown"
+    browser: str = "unknown"
 
 
 class StatsOut(BaseModel):
