@@ -1,0 +1,30 @@
+# Render deployment configuration
+# https://render.com/docs/yaml-spec
+
+services:
+  - type: web
+    name: utm-qr
+    env: python
+    region: oregon          # free-tier region
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+
+    # Persistent disk keeps the SQLite file alive across deploys/restarts.
+    # Free tier allows 1 GB.
+    disk:
+      name: qr-data
+      mountPath: /data
+      sizeGB: 1
+
+    envVars:
+      - key: DATABASE_URL
+        value: sqlite:////data/qr_redirects.db
+      - key: LOG_DIR
+        value: /data/logs
+      - key: FALLBACK_URL
+        value: https://forms.gle/mER9B21dKyLRjA9v5
+      - key: ADMIN_API_KEY
+        generateValue: true   # Render generates a secure random value
+      - key: ENABLE_DOCS
+        value: "false"        # disable Swagger UI in production
